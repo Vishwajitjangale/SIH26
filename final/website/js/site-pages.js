@@ -59,32 +59,182 @@
     var grid = document.getElementById('standardsResults');
     var count = document.getElementById('standardsCount');
     var empty = document.getElementById('standardsEmpty');
-    function render() {
-      var q=(input.value||'').trim().toLowerCase(), c=(category.value||'').toLowerCase();
-      var matches=standards.filter(function(s){ return (!q || (s.number+' '+s.title+' '+s.category+' '+s.keywords).toLowerCase().indexOf(q)>-1) && (!c || s.category.toLowerCase()===c); });
-      grid.innerHTML=matches.map(standardCard).join('');
-      count.textContent=matches.length+' standard'+(matches.length===1?'':'s')+' found';
-      empty.hidden=matches.length>0;
+    if (!input || !grid) return;
+
+    var API = window.BIS_API_BASE || 'http://127.0.0.1:8000';
+
+    function liveCard(s) {
+      var number = s.standard || 'Unspecified standard';
+      var title = s.title || 'Untitled standard';
+      var cat = s.category || 'General';
+      var status = s.status || 'Unknown';
+      var verification = s.verified ? 'Verified' : 'Unverified';
+      var score = s.match_score != null ? '<span class="tag tag-neutral">'+esc(s.match_score)+'% match</span>' : '';
+      var source = s.source_url || 'https://www.bis.gov.in/';
+      return '<article class="result-card page-card hoverable">' +
+        '<div class="flex-between"><div><div class="std-number">'+esc(number)+'</div><h3>'+esc(title)+'</h3></div><span class="tag tag-hi">'+esc(status)+'</span></div>' +
+        '<div class="result-meta"><span class="tag tag-neutral">'+esc(cat)+'</span><span class="tag tag-primary">'+esc(verification)+'</span>'+score+'</div>' +
+        '<div class="meta-row"><div class="meta-cell"><div class="k">Version</div><div class="v">'+esc(s.version || '—')+'</div></div><div class="meta-cell"><div class="k">Category</div><div class="v">'+esc(cat)+'</div></div><div class="meta-cell"><div class="k">Status</div><div class="v">'+esc(status)+'</div></div><div class="meta-cell"><div class="k">Source</div><div class="v">Official BIS</div></div></div>' +
+        '<div class="page-actions"><a class="btn btn-secondary btn-sm" href="'+esc(source)+'" target="_blank" rel="noopener noreferrer">View BIS Source</a><a class="btn btn-primary btn-sm" href="compliance.html?q='+encodeURIComponent(number+' '+title)+'">Check Compliance</a></div>' +
+        '</article>';
     }
-    form.addEventListener('submit',function(e){e.preventDefault();render();});
-    document.querySelectorAll('[data-standard-query]').forEach(function(chip){chip.addEventListener('click',function(){input.value=chip.dataset.standardQuery;render();});});
-    render();
+
+    function renderLoading() {
+      grid.innerHTML = '<div class="card" style="grid-column:1/-1;text-align:center;padding:30px;">Searching the indexed BIS standards library…</div>';
+      if (empty) empty.hidden = true;
+    }
+
+    function render(matches, q, label) {
+      grid.innerHTML = matches.map(liveCard).join('');
+      if (count) count.innerHTML = matches.length+' standard'+(matches.length===1?'':'s')+' found' + (q ? ' for <strong>'+esc(q)+'</strong>' : '') + (label ? ' <span class="tag tag-neutral" style="margin-left:8px;">'+esc(label)+'</span>' : '');
+      if (empty) empty.hidden = matches.length > 0;
+    }
+
+    async function runSearch() {
+      var q = (input.value || '').trim();
+      renderLoading();
+      var params = new URLSearchParams();
+      if (q) params.set('q', q);
+      if (category && category.value) params.set('category', category.value);
+      try {
+        var response = await fetch(API + '/api/standards?' + params.toString(), {headers:{Accept:'application/json'}});
+        if (!response.ok) throw new Error('HTTP '+response.status);
+        var data = await response.json();
+        if (!Array.isArray(data)) throw new Error('Invalid response');
+        render(data, q, 'Live backend');
+      } catch (err) {
+        console.warn('Live BIS search unavailable; showing local demo index.', err);
+        var fallback = standards.filter(function(s) {
+          var hay = (s.number+' '+s.title+' '+s.category+' '+s.keywords).toLowerCase();
+          var ql = q.toLowerCase();
+          var c = category ? category.value.toLowerCase() : '';
+          return (!ql || hay.indexOf(ql) > -1) && (!c || s.category.toLowerCase() === c);
+        });
+        render(fallback.map(function(s){ return {standard:s.number,title:s.title,category:s.category,status:s.status,version:'Demo',verified:false,source_url:'https://www.bis.gov.in/'}; }), q, 'Demo fallback');
+      }
+    }
+
+    form.addEventListener('submit', function(e){ e.preventDefault(); runSearch(); });
+    if (category) category.addEventListener('change', runSearch);
+    document.querySelectorAll('[data-standard-query]').forEach(function(chip){
+      chip.addEventListener('click', function(){ input.value = chip.dataset.standardQuery || ''; runSearch(); });
+    });
+    runSearch();
   }
 
   function initCompliancePage() {
-    var form=document.getElementById('complianceFormNew'); if(!form) return;
-    var result=document.getElementById('complianceDashboard');
-    var scoreEl=document.getElementById('scoreValue');
-    form.addEventListener('submit',function(e){
-      e.preventDefault();
-      var product=(document.getElementById('productName').value||'Product').trim();
-      var desc=(document.getElementById('productDescription').value||'').toLowerCase();
-      var match=/electrical|appliance|heater|mixer|iron/.test(desc+' '+product.toLowerCase()) ? standards[0] : (/steel|tmt/.test(desc+' '+product.toLowerCase()) ? standards[2] : standards[3]);
-      var score=/electrical|steel|plastic|food/.test(desc+' '+product.toLowerCase())?78:61;
-      scoreEl.textContent=score+'%';
-      result.innerHTML='<div class="analysis-grid"><div><span class="tag tag-hi">High-confidence demo match</span><h3>'+esc(match.number)+' — '+esc(match.title)+'</h3><p>Potentially applicable based on the product information supplied. Verify the latest official BIS applicability before making a certification decision.</p><div class="analysis-list"><div><b>Certification required</b><span>Depends on product and applicable scheme</span></div><div><b>Certification type</b><span>Product-specific BIS conformity pathway</span></div><div><b>Testing</b><span>Review the applicable standard test methods</span></div><div><b>Documents</b><span>Technical, manufacturing and business records</span></div><div><b>Laboratory</b><span>Select a suitable recognized laboratory</span></div></div></div><div class="score-panel"><div class="score-ring"><span>'+score+'%</span></div><div class="score-caption">Compliance Score</div><p>Demo score based on completeness of the supplied product information.</p></div></div>';
+    var form = document.getElementById('complianceFormNew');
+    if (!form) return;
+
+    var result = document.getElementById('complianceDashboard');
+    if (!result) return;
+
+    var API = window.BIS_API_BASE || 'http://127.0.0.1:8000';
+
+    function showLoading() {
+      result.innerHTML = '<div class="empty-state" style="background:transparent;padding:32px;text-align:center"><h3>Searching BIS sources…</h3><p>Checking the live BIS web evidence and your local knowledge base. This may take a few seconds.</p></div>';
+    }
+
+    function linkHtml(source) {
+      if (!source || !source.url) return '';
+      return '<li><a href="' + esc(source.url) + '" target="_blank" rel="noopener noreferrer">' + esc(source.title || source.url) + '</a></li>';
+    }
+
+    function renderAnswer(data) {
+      var answer = data.answer || 'No answer was returned.';
+      var confidence = data.confidence_label || 'LOW';
+      var webSources = Array.isArray(data.web_sources) ? data.web_sources : [];
+      var localSources = Array.isArray(data.sources) ? data.sources : [];
+      var standards = Array.isArray(data.standards) ? data.standards : [];
+
+      var sourceHtml = '';
+      if (webSources.length) {
+        sourceHtml += '<div class="analysis-list" style="margin-top:18px"><div><b>Live BIS web sources</b><span><ul style="margin:8px 0 0 18px">' + webSources.map(linkHtml).join('') + '</ul></span></div></div>';
+      }
+      if (localSources.length) {
+        sourceHtml += '<div class="analysis-list" style="margin-top:12px"><div><b>Local evidence</b><span>' + localSources.map(function(s){ return esc(s.title || s.standard || 'BIS evidence'); }).join(', ') + '</span></div></div>';
+      }
+
+      var standardsHtml = standards.length
+        ? '<div class="analysis-list" style="margin-top:12px"><div><b>Potentially applicable standards</b><span>' + standards.map(function(s){ return '<b>' + esc(s.is_number || '') + '</b> — ' + esc(s.title || '') + ' (' + esc(s.status || 'Unknown') + ')'; }).join('<br>') + '</span></div></div>'
+        : '';
+
+      var statusClass = data.status === 'grounded' ? 'tag-hi' : 'tag-warn';
+      var searchTag = data.web_search ? '<span class="tag tag-primary">Live web search</span>' : '<span class="tag tag-neutral">Web search not configured</span>';
+
+      result.innerHTML =
+        '<div class="analysis-grid">' +
+          '<div>' +
+            '<div class="result-meta"><span class="tag ' + statusClass + '">' + esc(data.status === 'grounded' ? 'Evidence-grounded answer' : 'Insufficient BIS evidence') + '</span>' + searchTag + '<span class="tag tag-neutral">Confidence: ' + esc(confidence) + '</span></div>' +
+            '<h3 style="margin-top:16px">Compliance analysis</h3>' +
+            '<div class="answer-body" style="white-space:pre-wrap;line-height:1.7">' + esc(answer) + '</div>' +
+            standardsHtml +
+            sourceHtml +
+          '</div>' +
+          '<div class="score-panel"><div class="score-ring"><span>' + esc(data.confidence != null ? Math.round(Number(data.confidence) * 100) + '%' : '—') + '</span></div><div class="score-caption">Evidence confidence</div><p>Confidence reflects the retrieved evidence. Always verify the latest official BIS requirements.</p></div>' +
+        '</div>';
+    }
+
+    async function runCompliance() {
+      var product = (document.getElementById('productName').value || '').trim();
+      var category = (document.getElementById('productCategory').value || '').trim();
+      var description = (document.getElementById('productDescription').value || '').trim();
+      var manufacturer = (document.getElementById('manufacturerType').value || '').trim();
+      var market = (document.getElementById('market').value || '').trim();
+      var location = (document.getElementById('location').value || '').trim();
+      var existing = (document.getElementById('existingStandard').value || '').trim();
+
+      if (!product || !description) return;
+
+      var question = [
+        'Product name: ' + product,
+        'Product category: ' + category,
+        'Product description: ' + description,
+        'Manufacturer type: ' + manufacturer,
+        'Intended market: ' + market,
+        'Country/location: ' + location,
+        existing ? 'Existing IS number: ' + existing : '',
+        '',
+        'Find the applicable BIS/Indian Standards and explain whether BIS certification or another mandatory requirement applies. Include relevant testing and documentation requirements only when supported by authoritative BIS evidence. Search the live internet for current official BIS information and provide source links.'
+      ].filter(Boolean).join('\n');
+
+      showLoading();
       document.getElementById('analysisSection').scrollIntoView({behavior:'smooth'});
+
+      try {
+        var response = await fetch(API + '/api/ask', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json', 'Accept':'application/json'},
+          body: JSON.stringify({question: question, language: 'en'})
+        });
+
+        var raw = await response.text();
+        var data;
+        try { data = JSON.parse(raw); } catch (_) { data = null; }
+        if (!response.ok) {
+          throw new Error((data && (data.detail || data.answer)) || ('Backend returned HTTP ' + response.status));
+        }
+        renderAnswer(data);
+      } catch (err) {
+        console.error('Compliance analysis failed:', err);
+        result.innerHTML = '<div class="empty-state" style="padding:32px"><h3>Could not get a live compliance answer</h3><p>' + esc(err.message || 'Could not connect to the BIS Intelligence backend.') + '</p><p style="margin-top:10px">Make sure the FastAPI server is running at ' + esc(API) + ' and that NVIDIA_API_KEY and TAVILY_API_KEY are configured in backend/.env.</p></div>';
+      }
+    }
+
+    form.addEventListener('submit', function(e){
+      e.preventDefault();
+      runCompliance();
     });
+
+    // Support links from Find Standards / homepage that pass ?q=...
+    var params = new URLSearchParams(window.location.search);
+    var q = params.get('q') || params.get('standard') || '';
+    if (q) {
+      var nameEl = document.getElementById('productName');
+      var descEl = document.getElementById('productDescription');
+      if (nameEl && !nameEl.value) nameEl.value = q;
+      if (descEl && !descEl.value) descEl.value = 'Please determine the current BIS requirements for ' + q + '.';
+    }
   }
 
   function initEvidencePage() {

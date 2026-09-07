@@ -1,6 +1,6 @@
 # BIS Intelligence — NVIDIA NIM Integration
 
-This patch connects the existing BIS Intelligence assistant to the backend endpoint `/api/ask`, which retrieves BIS evidence first and only then calls NVIDIA NIM.
+This version connects the BIS Intelligence assistant to `/api/ask`, which performs live BIS web search with Tavily, retrieves local BIS evidence, and then calls NVIDIA NIM for the grounded answer.
 
 ## Architecture
 
@@ -44,7 +44,7 @@ From the project root:
 
 ```powershell
 cd backend
-py -3.13 -m venv .venv
+py -3.12 -m venv .venv
 .venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
