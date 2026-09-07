@@ -1,0 +1,25 @@
+# Secrets
+.env
+*.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local database and uploads
+*.db
+*.sqlite
+*.sqlite3
+data/uploads/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+
+# Logs
+*.log
