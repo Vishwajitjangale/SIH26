@@ -8,6 +8,9 @@
 (function () {
   "use strict";
 
+  // Override this in the page with: window.BIS_API_BASE = "http://127.0.0.1:8000";
+  window.BIS_API_BASE = window.BIS_API_BASE || "http://127.0.0.1:8000";
+
   var NAV_SELECTOR = ".topnav";
   var HAMBURGER_ID = "hamburgerBtn";
   var SHEET_ID = "mobileSheet";
@@ -157,186 +160,111 @@
     return '<span class="tag tag-primary">' + ICONS.check + " " + v + "</span>";
   }
 
+  function escapeHtml(value) {
+    return String(value == null ? "" : value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#039;");
+  }
+
   function standardCardHtml(s) {
+    var number = s.number || s.standard || "Unspecified standard";
+    var title = s.title || "Untitled standard";
+    var category = s.category || "General";
+    var version = s.version || "—";
+    var status = s.status || "Unknown";
+    var verification = s.verification || (s.verified ? "Verified" : "Unverified");
+    var score = s.match_score != null ? s.match_score : null;
+    var sourceUrl = s.source_url || "https://www.bis.gov.in/";
+
     return (
       '<div class="result-card">' +
       '<div class="result-top"><div><div class="std-number">' +
-      s.number +
+      escapeHtml(number) +
       '</div><div class="std-title">' +
-      s.title +
+      escapeHtml(title) +
       '</div></div><div class="result-meta">' +
-      statusTagHtml(s.status) +
+      statusTagHtml(escapeHtml(status)) +
       "</div></div>" +
       '<div class="result-meta"><span class="tag tag-neutral">' +
-      s.category +
+      escapeHtml(category) +
       "</span>" +
-      verifyTagHtml(s.verification) +
-      '<span class="tag tag-neutral">' +
-      ICONS.file +
-      " " +
-      s.evidence +
-      " evidence item" +
-      (s.evidence === 1 ? "" : "s") +
-      "</span></div>" +
+      verifyTagHtml(escapeHtml(verification)) +
+      (score != null ? '<span class="tag tag-neutral">' + ICONS.search + " " + escapeHtml(score) + "% match</span>" : "") +
+      "</div>" +
       '<div class="meta-row">' +
-      '<div class="meta-cell"><div class="k">Version</div><div class="v">' + s.version + "</div></div>" +
-      '<div class="meta-cell"><div class="k">Category</div><div class="v">' + s.category + "</div></div>" +
-      '<div class="meta-cell"><div class="k">Status</div><div class="v">' + s.status + "</div></div>" +
-      '<div class="meta-cell"><div class="k">Verification</div><div class="v">' + s.verification + "</div></div>" +
+      '<div class="meta-cell"><div class="k">Version</div><div class="v">' + escapeHtml(version) + "</div></div>" +
+      '<div class="meta-cell"><div class="k">Category</div><div class="v">' + escapeHtml(category) + "</div></div>" +
+      '<div class="meta-cell"><div class="k">Status</div><div class="v">' + escapeHtml(status) + "</div></div>" +
+      '<div class="meta-cell"><div class="k">Verification</div><div class="v">' + escapeHtml(verification) + "</div></div>" +
       "</div>" +
       '<div style="margin-top:16px;display:flex;gap:10px;flex-wrap:wrap;">' +
-      '<a href="evidence.html" class="btn btn-secondary btn-sm">' + ICONS.eye + " View evidence</a>" +
-      '<a href="compliance.html" class="btn btn-ghost btn-sm">Analyze compliance</a>' +
+      '<a href="' + escapeHtml(sourceUrl) + '" target="_blank" rel="noopener noreferrer" class="btn btn-secondary btn-sm">' + ICONS.eye + " View BIS source</a>" +
+      '<a href="compliance.html?q=' + encodeURIComponent(number + " " + title) + '" class="btn btn-ghost btn-sm">Analyze compliance</a>' +
       "</div></div>"
     );
-  }
-
-  var CHECKLIST_STEPS = [
-    "Identify applicable standard",
-    "Verify latest version and amendments",
-    "Determine whether BIS certification/licensing applies",
-    "Identify required tests",
-    "Identify inspection requirements",
-    "Prepare technical documents",
-    "Find suitable laboratory",
-    "Follow the applicable BIS process",
-    "Maintain compliance evidence"
-  ];
-
-  function confidenceTagHtml(c) {
-    if (c === "High") return '<span class="tag tag-hi">' + ICONS.check + " HIGH confidence</span>";
-    if (c === "Medium") return '<span class="tag tag-med">' + ICONS.alert + " MEDIUM confidence</span>";
-    return '<span class="tag tag-lo">' + ICONS.alert + " LOW confidence</span>";
-  }
-
-  function analyzeComplianceDemo(description) {
-    var lower = (description || "").toLowerCase().trim();
-    if (!lower) return null;
-    if (/(appliance|heater|electric)/.test(lower)) {
-      return { confidence: "High", standard: DEMO_STANDARDS[0], evidence: DEMO_EVIDENCE[0], sufficient: true };
-    }
-    if (/(plastic|food)/.test(lower)) {
-      return { confidence: "Medium", standard: DEMO_STANDARDS[1], evidence: DEMO_EVIDENCE[1], sufficient: true };
-    }
-    return { sufficient: false };
-  }
-
-  function insufficientEvidenceHtml() {
-    return (
-      '<div class="insufficient-card fade-in">' +
-      '<div class="icon-badge">' + ICONS.alert.replace('width="13" height="13"', 'width="24" height="24"') + "</div>" +
-      "<h3>Insufficient authoritative evidence</h3>" +
-      "<p>I could not verify this from the available authoritative knowledge base. I will not invent a compliance answer.</p>" +
-      '<p style="margin-top:10px;font-size:13px;">Try describing the product\'s material, category, or intended use in more detail, or browse the standards library directly.</p>' +
-      '<div style="margin-top:16px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">' +
-      '<a href="find-standards.html" class="btn btn-secondary btn-sm">Browse standards</a>' +
-      demoTagHtml() +
-      "</div></div>"
-    );
-  }
-
-  function complianceResultHtml(r) {
-    return (
-      '<div class="card white fade-in">' +
-      '<div class="flex-between">' + confidenceTagHtml(r.confidence) + demoTagHtml() + "</div>" +
-      '<h3 style="margin-top:14px;">' + r.standard.number + " — " + r.standard.title + "</h3>" +
-      '<div class="evidence-block"><div class="src">' +
-      r.evidence.source + " · Page " + r.evidence.page + " · " + r.evidence.section +
-      '</div><div class="txt">"' + r.evidence.text + '"</div></div>' +
-      '<p style="margin-top:14px;font-size:13.5px;">This is decision-support information generated from retrieved evidence — not a final legal certification decision. Verify against current official BIS sources.</p>' +
-      '<hr class="divider" style="margin:18px 0;"/>' +
-      '<h4 style="font-size:15px;margin-bottom:10px;">Compliance roadmap</h4>' +
-      '<div id="checklistMount">' +
-      CHECKLIST_STEPS.map(function (step) {
-        return (
-          '<label class="step-row" style="cursor:pointer;">' +
-          '<input type="checkbox" style="width:20px;height:20px;accent-color:var(--primary);margin-top:2px;flex-shrink:0;"/>' +
-          '<span style="font-size:14.5px;padding-top:1px;">' + step + "</span></label>"
-        );
-      }).join("") +
-      "</div></div>"
-    );
-  }
-
-  function initComplianceAssistant() {
-    var form = document.getElementById("complianceForm");
-    var input = document.getElementById("complianceInput");
-    var resultEl = document.getElementById("complianceResult");
-    var awaitingEl = document.getElementById("complianceAwaiting");
-    if (!form || !input || !resultEl) return;
-
-    function renderResult(desc) {
-      if (!desc.trim()) {
-        resultEl.innerHTML = "";
-        if (awaitingEl) awaitingEl.style.display = "block";
-        return;
-      }
-      if (awaitingEl) awaitingEl.style.display = "none";
-      resultEl.innerHTML =
-        '<div class="card white" style="text-align:center;padding:40px 24px;">' +
-        '<div class="loader-dots"><span></span><span></span><span></span></div>' +
-        '<p style="font-size:14px;margin-top:6px;">Retrieving evidence and generating a grounded explanation…</p></div>';
-
-      window.setTimeout(function () {
-        var r = analyzeComplianceDemo(desc);
-        resultEl.innerHTML = r && r.sufficient ? complianceResultHtml(r) : insufficientEvidenceHtml();
-      }, 500);
-    }
-
-    form.addEventListener("submit", function (e) {
-      e.preventDefault();
-      renderResult(input.value);
-    });
-
-    var exBtn = document.querySelector(".example-fill");
-    if (exBtn) {
-      exBtn.addEventListener("click", function () {
-        input.value = exBtn.getAttribute("data-q");
-      });
-    }
-
-    var params = new URLSearchParams(window.location.search);
-    var initialQ = params.get("q") || "";
-    if (initialQ) {
-      input.value = initialQ;
-      renderResult(initialQ);
-    } else if (awaitingEl) {
-      awaitingEl.style.display = "block";
-    }
   }
 
   /* ---------- Find Standards page ---------- */
   function initFindStandards() {
-    var form = document.getElementById("findForm");
-    var input = document.getElementById("findInput");
-    var resultsEl = document.getElementById("findResults");
-    var summaryEl = document.getElementById("findSummary");
+    // The current page uses standardsSearchForm/standardsSearch/standardsResults.
+    // The older prototype used findForm/findInput/findResults, so support both.
+    var form = document.getElementById("standardsSearchForm") || document.getElementById("findForm");
+    var input = document.getElementById("standardsSearch") || document.getElementById("findInput");
+    var categoryInput = document.getElementById("standardsCategory");
+    var resultsEl = document.getElementById("standardsResults") || document.getElementById("findResults");
+    var summaryEl = document.getElementById("standardsCount") || document.getElementById("findSummary");
+    var emptyEl = document.getElementById("standardsEmpty");
     if (!form || !input || !resultsEl) return;
 
-    function runSearch(query) {
-      var q = (query || "").trim();
-      input.value = q;
-      var matches = !q
-        ? DEMO_STANDARDS
-        : DEMO_STANDARDS.filter(function (s) {
-            var haystack = (s.number + " " + s.title + " " + s.category + " " + s.keywords).toLowerCase();
-            return haystack.indexOf(q.toLowerCase()) !== -1;
-          });
+    var API = window.BIS_API_BASE || "http://127.0.0.1:8000";
 
+    function render(matches, q, sourceLabel) {
       if (summaryEl) {
-        summaryEl.innerHTML =
-          '<p style="font-size:13.5px;">' +
-          matches.length +
-          " result" +
-          (matches.length === 1 ? "" : "s") +
-          (q ? ' for "<strong style="color:var(--text-primary);">' + q.replace(/</g, "&lt;") + '</strong>"' : " — showing the full indexed set") +
-          "</p>" +
-          demoTagHtml();
+        var text = matches.length + " result" + (matches.length === 1 ? "" : "s");
+        if (q) text += ' for "' + escapeHtml(q) + '"';
+        summaryEl.innerHTML = text + (sourceLabel ? ' <span class="tag tag-neutral" style="margin-left:8px;">' + escapeHtml(sourceLabel) + '</span>' : "");
       }
 
-      resultsEl.innerHTML =
-        matches.map(standardCardHtml).join("") ||
-        '<p style="padding:24px 0;">No standards matched. Try a broader description.</p>';
+      resultsEl.innerHTML = matches.map(standardCardHtml).join("");
+      if (emptyEl) emptyEl.hidden = matches.length !== 0;
+    }
+
+    function renderLoading() {
+      resultsEl.innerHTML = '<div class="card" style="grid-column:1/-1;text-align:center;padding:32px;">' + ICONS.search + ' Searching the indexed BIS standards library…</div>';
+      if (emptyEl) emptyEl.hidden = true;
+    }
+
+    async function runSearch(query) {
+      var q = (query || "").trim();
+      input.value = q;
+      renderLoading();
+
+      var params = new URLSearchParams();
+      if (q) params.set("q", q);
+      if (categoryInput && categoryInput.value) params.set("category", categoryInput.value);
+
+      try {
+        var response = await fetch(API + "/api/standards?" + params.toString(), {
+          headers: { Accept: "application/json" }
+        });
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        var data = await response.json();
+        if (!Array.isArray(data)) throw new Error("Invalid search response");
+
+        render(data, q, "Live backend");
+      } catch (error) {
+        console.warn("BIS standards search unavailable; using demo index.", error);
+        var lowerQ = q.toLowerCase();
+        var category = categoryInput ? categoryInput.value.toLowerCase() : "";
+        var matches = DEMO_STANDARDS.filter(function (item) {
+          var haystack = (item.number + " " + item.title + " " + item.category + " " + item.keywords).toLowerCase();
+          return (!lowerQ || haystack.indexOf(lowerQ) !== -1) && (!category || item.category.toLowerCase().indexOf(category) !== -1);
+        });
+        render(matches, q, "Demo fallback — backend unavailable");
+      }
     }
 
     form.addEventListener("submit", function (e) {
@@ -344,9 +272,16 @@
       runSearch(input.value);
     });
 
-    document.querySelectorAll(".find-example[data-q]").forEach(function (chip) {
+    if (categoryInput) {
+      categoryInput.addEventListener("change", function () {
+        runSearch(input.value);
+      });
+    }
+
+    document.querySelectorAll("[data-standard-query], .find-example[data-q]").forEach(function (chip) {
       chip.addEventListener("click", function () {
-        runSearch(chip.getAttribute("data-q"));
+        var q = chip.getAttribute("data-standard-query") || chip.getAttribute("data-q") || "";
+        runSearch(q);
       });
     });
 
@@ -469,7 +404,6 @@
     initHeroSearch();
     initFaqAccordion();
     initContactForm();
-    initFindStandards();
-    initComplianceAssistant();
+    // Find Standards and Compliance Assistant are initialized by site-pages.js.
   });
 })();

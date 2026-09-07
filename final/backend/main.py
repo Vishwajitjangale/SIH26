@@ -10,6 +10,7 @@ from typing import Optional
 import jwt
 from dotenv import load_dotenv
 from openai import OpenAI
+import requests
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -26,9 +27,13 @@ from sklearn.metrics.pairwise import cosine_similarity
 # ---------------------------------------------------------
 # Configurations
 # ---------------------------------------------------------
-load_dotenv()
+BASE = Path(__file__).resolve().parent
+load_dotenv(BASE / ".env")
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
-NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "meta/llama-3.3-70b-instruct")
+NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "nvidia/nemotron-3.5-lightning-30b-a3b")
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+TAVILY_MAX_RESULTS = int(os.getenv("TAVILY_MAX_RESULTS", "6"))
+
 NVIDIA_BASE_URL = os.getenv(
     "NVIDIA_BASE_URL",
     "https://integrate.api.nvidia.com/v1"
@@ -45,7 +50,6 @@ nim_client = (
     else None
 )
 
-BASE = Path(__file__).resolve().parent
 DATA = BASE.parent / "data"
 UPLOADS = DATA / "uploads"
 UPLOADS.mkdir(parents=True, exist_ok=True)
@@ -438,58 +442,72 @@ def seed(s: Session):
             )
         )
 
-    if not s.scalar(select(Document)):
-        path = DATA / "demo" / "standards.json"
+    path = DATA / "demo" / "standards.json"
 
-        if path.exists():
-            records = json.loads(path.read_text(encoding="utf-8"))
+    if path.exists():
+        records = json.loads(path.read_text(encoding="utf-8"))
 
-            details = {
-                "IS 302 (Part 1):2008": (
-                    "Safety requirements for household and similar "
-                    "electrical appliances; use this demo record to "
-                    "illustrate grounded retrieval for electrical products."
+        details = {
+            "IS 302 (Part 1):2008": (
+                "Safety requirements for household and similar "
+                "electrical appliances; use this demo record to "
+                "illustrate grounded retrieval for electrical products."
+            ),
+            "IS 17043:2018": (
+                "Demo consumer product standard record used to "
+                "demonstrate metadata, versioning and evidence cards."
+            ),
+            "IS 9845:1998": (
+                "Demo food-contact plastics record used to demonstrate "
+                "product/material retrieval and compliance workflows."
+            ),
+        }
+
+        existing_standards = {
+            value for value in s.scalars(
+                select(Document.standard_number).where(Document.standard_number.is_not(None))
+            ).all()
+        }
+
+        for r in records:
+            if r["standard"] in existing_standards:
+                continue
+
+            content = details.get(
+                r["standard"],
+                (
+                    "Demo BIS standards index record for " + r["standard"] + ". "
+                    "This metadata is included for prototype search and navigation only. "
+                    "Consult the current official BIS publication for technical requirements, "
+                    "certification applicability and test methods."
                 ),
-                "IS 17043:2018": (
-                    "Demo consumer product standard record used to "
-                    "demonstrate metadata, versioning and evidence cards."
-                ),
-                "IS 9845:1998": (
-                    "Demo food-contact plastics record used to demonstrate "
-                    "product/material retrieval and compliance workflows."
-                ),
-            }
+            )
 
-            for r in records:
-                content = details.get(r["standard"], "")
+            d = Document(
+                title=r["standard"],
+                standard_number=r["standard"],
+                category=r["category"],
+                version="Demo",
+                source_url="https://www.bis.gov.in/",
+                source_type=r["source_type"],
+                status="CURRENT",
+                content=content,
+                content_hash=hashlib.sha256(content.encode()).hexdigest(),
+                verified=False,
+            )
 
-                d = Document(
-                    title=r["standard"],
-                    standard_number=r["standard"],
-                    category=r["category"],
-                    version="Demo",
-                    source_url="https://www.bis.gov.in/",
-                    source_type=r["source_type"],
-                    status="CURRENT",
-                    content=content,
-                    content_hash=hashlib.sha256(
-                        content.encode()
-                    ).hexdigest(),
-                    verified=False,
-                )
+            s.add(d)
+            s.flush()
 
-                s.add(d)
-                s.flush()
-
-                for i, piece in enumerate(chunk_text(content)):
-                    s.add(
-                        Chunk(
-                            document_id=d.id,
-                            text=piece,
-                            page=1,
-                            section=f"Demo section {i + 1}",
-                        )
+            for i, piece in enumerate(chunk_text(content)):
+                s.add(
+                    Chunk(
+                        document_id=d.id,
+                        text=piece,
+                        page=1,
+                        section=f"Demo section {i + 1}",
                     )
+                )
 
     s.commit()
 
@@ -550,6 +568,19 @@ def health():
         "rag": "chunk-tfidf",
         "nvidia_nim": "configured" if NVIDIA_API_KEY else "not_configured",
         "nvidia_model": NVIDIA_MODEL,
+        "tavily_web_search": "configured" if TAVILY_API_KEY else "not_configured",
+    }
+
+
+@app.get("/api/web-search-test")
+def web_search_test(q: str = "electric room heater BIS standard"):
+    """Safe diagnostic endpoint: never returns API keys, only search status/results."""
+    results = _web_search(q, max_results=5)
+    return {
+        "configured": bool(TAVILY_API_KEY),
+        "query": q,
+        "result_count": len(results),
+        "results": [{"title": x["title"], "url": x["url"], "score": x["score"]} for x in results],
     }
 
 
@@ -639,7 +670,9 @@ BIS_AI_SYSTEM_PROMPT = """You are BIS Intelligence, an AI assistant for Indian S
 
 Your purpose is to help Indian industries, manufacturers, businesses and consumers understand BIS standards, certification requirements, testing requirements, laboratories, documents and compliance procedures.
 
-Use the supplied official BIS context as the primary source of truth.
+Use the supplied official BIS context and live web evidence as sources of truth. Prefer official BIS sources whenever available.
+
+When using live web evidence, cite sources inline as [Web 1], [Web 2], etc. Never fabricate a source or citation.
 
 Never invent:
 - IS numbers
@@ -665,6 +698,74 @@ When possible, provide:
 
 Answer in the user's selected language. Keep IS numbers, standard numbers, official scheme names and technical identifiers unchanged.
 """
+
+
+def _tavily_request(query: str, max_results: int, domains=None):
+    if not TAVILY_API_KEY:
+        return []
+    payload = {
+        "api_key": TAVILY_API_KEY,
+        "query": query,
+        "search_depth": "advanced",
+        "topic": "general",
+        "max_results": max_results,
+        "include_answer": False,
+        "include_raw_content": True,
+    }
+    if domains:
+        payload["include_domains"] = domains
+    try:
+        r = requests.post("https://api.tavily.com/search", json=payload, timeout=25)
+        r.raise_for_status()
+        data = r.json()
+    except Exception as exc:
+        print(f"Tavily web search error: {type(exc).__name__}: {exc}")
+        return []
+
+    results = []
+    for item in data.get("results", []):
+        url = item.get("url")
+        title = item.get("title") or url or "Web source"
+        content = item.get("raw_content") or item.get("content") or ""
+        if not url:
+            continue
+        results.append({
+            "title": title,
+            "url": url,
+            "content": normalize_text(content)[:5000],
+            "score": float(item.get("score") or 0),
+        })
+    return results
+
+
+def _web_search(query: str, max_results: int = None):
+    """Search live web. Prefer BIS/government sources, then fall back to the wider web."""
+    if not TAVILY_API_KEY:
+        return []
+    max_results = max_results or TAVILY_MAX_RESULTS
+    bis_domains = [
+        "bis.gov.in", "standards.bis.gov.in", "services.bis.gov.in", "manakonline.in"
+    ]
+    results = _tavily_request(query, max_results, bis_domains)
+    if results:
+        return results
+    # A strict BIS-domain query can legitimately return zero results for some
+    # products. Do a wider search so the assistant can still find current evidence,
+    # while the model is instructed to prefer official BIS/government sources.
+    wider_query = f"India BIS Bureau of Indian Standards {query} official requirements standard certification"
+    return _tavily_request(wider_query, max_results, None)
+
+
+def _build_web_context(results):
+    blocks = []
+    for i, item in enumerate(results[:8], 1):
+        blocks.append(
+            f"[Web Evidence {i}]\n"
+            f"Title: {item['title']}\n"
+            f"URL: {item['url']}\n"
+            f"Content: {item['content'][:4500]}"
+        )
+    return "\n\n".join(blocks)
 
 
 def _ask_error_message(lang: str) -> str:
@@ -695,7 +796,7 @@ def _build_evidence_context(hits):
     return "\n\n".join(blocks)
 
 
-def _nim_chat(question: str, language: str, evidence_context: str):
+def _nim_chat(question: str, language: str, evidence_context: str, web_context: str = ""):
     if not NVIDIA_API_KEY or not nim_client:
         raise RuntimeError("NVIDIA API key is not configured")
 
@@ -708,8 +809,9 @@ def _nim_chat(question: str, language: str, evidence_context: str):
                 "content": (
                     f"Selected language: {language}\n\n"
                     f"User question:\n{question}\n\n"
-                    f"Retrieved BIS context:\n{evidence_context}\n\n"
-                    "Generate a concise, evidence-grounded answer. Do not use outside knowledge for BIS-specific claims."
+                    f"Retrieved BIS context:\n{evidence_context or 'No local BIS evidence found.'}\n\n"
+                    f"Live web evidence:\n{web_context or 'No live web evidence found.'}\n\n"
+                    "Generate a concise, evidence-grounded answer. Prefer official BIS sources. If evidence conflicts, explain the conflict and use the newest authoritative source. Do not use unsupported outside knowledge."
                 ),
             },
         ],
@@ -731,13 +833,21 @@ def ask(
     if not q:
         raise HTTPException(400, "Please enter a question.")
 
+    # 1) Search the live internet first. The search is restricted to authoritative
+    # BIS-related domains so compliance answers are not driven by random blogs.
+    web_hits = _web_search(q)
+
+    # 2) Also search the project's local evidence database.
     hits = retrieve_chunks(s, q, k=8)
     top_score = hits[0]["score"] if hits else 0.0
-    confidence = confidence_from_score(top_score)
+    local_confidence = confidence_from_score(top_score)
     intent = infer_intent(q)
 
-    # Do not send unsupported or weak retrieval results to the LLM.
-    if not hits or top_score < 0.12:
+    web_context = _build_web_context(web_hits)
+    local_context = _build_evidence_context(hits)
+
+    # We can answer when either live authoritative web evidence OR local evidence exists.
+    if not web_hits and TAVILY_API_KEY and (not hits or top_score < 0.12):
         s.add(QueryLog(
             user_id=u.id if u else None,
             query=q,
@@ -747,28 +857,42 @@ def ask(
         s.commit()
         return {
             "status": "insufficient_evidence",
-            "answer": translations[lang]["insufficient"],
+            "answer": (
+                "Live BIS web search returned no usable results. Check the Tavily API key and "
+                "the /api/web-search-test endpoint, then try again."
+                if TAVILY_API_KEY else translations[lang]["insufficient"]
+            ),
             "sources": [],
+            "web_sources": [],
             "confidence": 0.0,
             "confidence_label": "LOW",
             "standards": [],
             "certification": [],
             "testing": [],
             "documents": [],
+            "web_search": bool(TAVILY_API_KEY),
         }
 
-    context = _build_evidence_context(hits)
-
     try:
-        answer = _nim_chat(q, lang, context)
+        answer = _nim_chat(q, lang, local_context, web_context)
     except Exception as exc:
         print(f"NVIDIA NIM /api/ask error: {type(exc).__name__}: {exc}")
         raise HTTPException(502, _ask_error_message(lang))
 
-    sources = [evidence_payload(item) for item in hits[:5]]
+    local_sources = [evidence_payload(item) for item in hits[:5]]
+    web_sources = [
+        {
+            "title": item["title"],
+            "url": item["url"],
+            "score": round(item["score"], 3),
+            "source": "Live web search",
+        }
+        for item in web_hits[:8]
+    ]
+
     standards = []
     seen = set()
-    for item in sources:
+    for item in local_sources:
         standard = item.get("standard")
         if standard and standard not in seen:
             seen.add(standard)
@@ -780,13 +904,13 @@ def ask(
                 "status": item.get("status"),
             })
 
-    # These fields intentionally remain evidence-derived rather than guessed.
     result = {
         "status": "grounded",
         "answer": answer,
-        "sources": sources,
-        "confidence": round(top_score, 3),
-        "confidence_label": confidence,
+        "sources": local_sources,
+        "web_sources": web_sources,
+        "confidence": round(max(top_score, max((x["score"] for x in web_hits), default=0.0)), 3),
+        "confidence_label": "HIGH" if web_hits else local_confidence,
         "standards": standards,
         "certification": [],
         "testing": [],
@@ -798,562 +922,19 @@ def ask(
                 "page": src["evidence"][0]["page"],
                 "section": src["evidence"][0]["section"],
             }
-            for src in sources
+            for src in local_sources
         ],
         "intent": intent,
         "model": NVIDIA_MODEL,
+        "web_search": bool(TAVILY_API_KEY),
     }
 
     s.add(QueryLog(
         user_id=u.id if u else None,
         query=q,
         intent=intent,
-        confidence=confidence,
+        confidence=result["confidence_label"],
     ))
     s.commit()
     return result
 
-
-# ---------------------------------------------------------
-# Main RAG + compliance analysis
-# ---------------------------------------------------------
-@app.post("/api/compliance/analyze")
-def analyze(
-    x: AnalyzeIn,
-    s: Session = Depends(db),
-    u=Depends(current_user),
-):
-    q = x.query.strip()
-    lang = x.language if x.language in translations else "en"
-
-    if not q:
-        return {
-            "status": "insufficient_evidence",
-            "message": translations[lang]["insufficient"],
-            "sources": [],
-        }
-
-    hits = retrieve_chunks(s, q, k=8)
-    intent = infer_intent(q)
-    top_score = hits[0]["score"] if hits else 0
-    confidence = confidence_from_score(top_score)
-
-    nim_answer = None
-    if hits and nim_client:
-        evidence_text = "\n\n".join(
-            [
-                f"Source: {h['document'].title}\n"
-                f"Standard: {h['document'].standard_number or 'N/A'}\n"
-                f"Section: {h['chunk'].section or 'N/A'}\n"
-                f"Page: {h['chunk'].page or 'N/A'}\n"
-                f"Evidence: {h['chunk'].text[:1500]}"
-                for h in hits[:5]
-            ]
-        )
-        try:
-            response = nim_client.chat.completions.create(
-                model=NVIDIA_MODEL,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": BIS_AI_SYSTEM_PROMPT,
-                    },
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Language: {lang}\n\n"
-                            f"Compliance query:\n{q}\n\n"
-                            f"Retrieved BIS evidence:\n{evidence_text}\n\n"
-                            "Answer only from the supplied evidence."
-                        ),
-                    },
-                ],
-                temperature=0.2,
-                max_tokens=1024,
-            )
-            nim_answer = response.choices[0].message.content
-        except Exception as exc:
-            print(f"NVIDIA NIM error: {type(exc).__name__}: {exc}")
-
-    s.add(
-        QueryLog(
-            user_id=u.id if u else None,
-            query=q,
-            intent=intent,
-            confidence=confidence,
-        )
-    )
-    s.commit()
-
-    if not hits or confidence == "LOW":
-        return {
-            "status": "insufficient_evidence",
-            "message": translations[lang]["insufficient"],
-            "intent": intent,
-            "confidence": confidence,
-            "sources": [],
-        }
-
-    results = [evidence_payload(item) for item in hits]
-    top = results[0]
-
-    roadmap = [
-        "Identify the potentially applicable standard",
-        "Verify the latest standard version and amendments",
-        "Verify whether BIS certification/licensing applies",
-        "Check required tests and inspection steps",
-        "Prepare technical and application documents",
-        "Select a laboratory with required capability",
-        "Submit through the applicable official BIS process",
-        "Maintain evidence and monitor amendments",
-    ]
-
-    return {
-        "status": "grounded",
-        "query": q,
-        "intent": intent,
-        "confidence": confidence,
-        "results": results,
-        "answer": {
-            "headline": nim_answer or translations[lang]["match"],
-            "nim_answer": nim_answer,
-            "why": [
-                f"Retrieved evidence from {top['standard'] or top['title']}",
-                "The result is based on indexed document chunks",
-                "Page/section evidence is attached to each result",
-                "Only CURRENT documents participate in retrieval",
-            ],
-            "roadmap": roadmap,
-            "disclaimer": (
-                "Prototype information. Verify current applicability "
-                "with official BIS sources before compliance decisions."
-            ),
-        },
-    }
-
-
-# ---------------------------------------------------------
-# Checklist
-# ---------------------------------------------------------
-@app.post("/api/compliance/checklist")
-def compliance_checklist(
-    x: AnalyzeIn,
-    s: Session = Depends(db),
-    u=Depends(current_user),
-):
-    hits = retrieve_chunks(s, x.query, 5)
-
-    if not hits:
-        return {
-            "status": "insufficient_evidence",
-            "items": [],
-            "message": translations.get(
-                x.language,
-                translations["en"],
-            )["insufficient"],
-        }
-
-    top = hits[0]["document"]
-
-    base = [
-        "Identify the applicable standard",
-        "Confirm the latest version and amendments",
-        "Verify whether BIS certification/licensing applies",
-        "Confirm required tests and inspection steps",
-        "Prepare technical and application documents",
-        "Select a laboratory with the required capability",
-        "Submit through the applicable official BIS process",
-        "Maintain evidence and monitor amendments",
-    ]
-
-    return {
-        "status": "grounded",
-        "standard": top.standard_number,
-        "items": [
-            {
-                "id": i + 1,
-                "label": label,
-                "required": True,
-                "evidence_source": top.title,
-            }
-            for i, label in enumerate(base)
-        ],
-        "disclaimer": (
-            "Checklist is an AI-assisted planning aid, "
-            "not a certification decision."
-        ),
-    }
-
-
-# ---------------------------------------------------------
-# Standards
-# ---------------------------------------------------------
-@app.get("/api/standards")
-def standards(
-    q: Optional[str] = None,
-    s: Session = Depends(db),
-):
-    if q:
-        hits = retrieve_chunks(s, q, 20)
-
-        # Deduplicate documents returned through multiple chunks.
-        seen = set()
-        docs = []
-
-        for item in hits:
-            d = item["document"]
-            if d.id not in seen:
-                seen.add(d.id)
-                docs.append(d)
-    else:
-        docs = list(
-            s.scalars(
-                select(Document)
-                .where(Document.status != "OBSOLETE")
-                .order_by(Document.id.desc())
-            ).all()
-        )
-
-    return [
-        {
-            "id": d.id,
-            "standard": d.standard_number,
-            "title": d.title,
-            "category": d.category,
-            "version": d.version,
-            "status": d.status,
-            "verified": d.verified,
-            "source_url": d.source_url,
-        }
-        for d in docs
-    ]
-
-
-# ---------------------------------------------------------
-# Evidence endpoint
-# ---------------------------------------------------------
-@app.get("/api/evidence/{document_id}")
-def document_evidence(
-    document_id: int,
-    s: Session = Depends(db),
-):
-    d = s.get(Document, document_id)
-
-    if not d:
-        raise HTTPException(404, "Document not found")
-
-    chunks = list(
-        s.scalars(
-            select(Chunk)
-            .where(Chunk.document_id == document_id)
-            .order_by(Chunk.page, Chunk.id)
-        ).all()
-    )
-
-    return {
-        "document": {
-            "id": d.id,
-            "title": d.title,
-            "standard_number": d.standard_number,
-            "category": d.category,
-            "version": d.version,
-            "status": d.status,
-            "verified": d.verified,
-            "source": {
-                "type": d.source_type,
-                "url": d.source_url,
-            },
-        },
-        "chunks": [
-            {
-                "id": c.id,
-                "page": c.page,
-                "section": c.section,
-                "text": c.text,
-            }
-            for c in chunks
-        ],
-    }
-
-
-# ---------------------------------------------------------
-# Admin
-# ---------------------------------------------------------
-@app.get("/api/admin/overview")
-def admin_overview(
-    s: Session = Depends(db),
-    u=Depends(require_admin),
-):
-    docs = list(s.scalars(select(Document)).all())
-    logs = list(s.scalars(select(QueryLog)).all())
-    users = list(s.scalars(select(User)).all())
-
-    low = sum(
-        1 for x in logs
-        if x.confidence == "LOW"
-    )
-
-    return {
-        "documents": len(docs),
-        "current_documents": sum(
-            d.status == "CURRENT"
-            for d in docs
-        ),
-        "verified_documents": sum(
-            d.verified
-            for d in docs
-        ),
-        "obsolete_documents": sum(
-            d.status == "OBSOLETE"
-            for d in docs
-        ),
-        "queries": len(logs),
-        "low_confidence_queries": low,
-        "users": len(users),
-    }
-
-
-@app.get("/api/admin/queries")
-def admin_queries(
-    s: Session = Depends(db),
-    u=Depends(require_admin),
-):
-    logs = list(
-        s.scalars(
-            select(QueryLog)
-            .order_by(QueryLog.id.desc())
-            .limit(50)
-        ).all()
-    )
-
-    return [
-        {
-            "query": x.query,
-            "intent": x.intent,
-            "confidence": x.confidence,
-            "created_at": x.created_at.isoformat(),
-        }
-        for x in logs
-    ]
-
-
-@app.get("/api/admin/documents")
-def admin_docs(
-    s: Session = Depends(db),
-    u=Depends(require_admin),
-):
-    docs = list(
-        s.scalars(
-            select(Document)
-            .order_by(Document.id.desc())
-        ).all()
-    )
-
-    return [
-        {
-            "id": d.id,
-            "title": d.title,
-            "standard_number": d.standard_number,
-            "version": d.version,
-            "status": d.status,
-            "verified": d.verified,
-            "source_type": d.source_type,
-            "created_at": d.created_at.isoformat(),
-        }
-        for d in docs
-    ]
-
-
-@app.post("/api/admin/documents/{document_id}/verify")
-def verify_document(
-    document_id: int,
-    x: VerifyDocumentIn,
-    s: Session = Depends(db),
-    u=Depends(require_admin),
-):
-    d = s.get(Document, document_id)
-
-    if not d:
-        raise HTTPException(404, "Document not found")
-
-    d.verified = x.verified
-    s.commit()
-
-    return {
-        "id": d.id,
-        "verified": d.verified,
-        "status": d.status,
-    }
-
-
-# ---------------------------------------------------------
-# PDF ingestion
-# ---------------------------------------------------------
-@app.post("/api/admin/documents/upload")
-async def upload_document(
-    file: UploadFile = File(...),
-    s: Session = Depends(db),
-    u=Depends(require_admin),
-):
-    filename = file.filename or ""
-
-    if not filename.lower().endswith(".pdf"):
-        raise HTTPException(
-            422,
-            "Only PDF uploads are supported",
-        )
-
-    raw = await file.read()
-
-    if len(raw) > 10 * 1024 * 1024:
-        raise HTTPException(
-            413,
-            "Maximum file size is 10 MB",
-        )
-
-    digest = hashlib.sha256(raw).hexdigest()
-    path = UPLOADS / f"{digest}.pdf"
-
-    # Avoid storing the same physical file twice.
-    if not path.exists():
-        path.write_bytes(raw)
-
-    try:
-        reader = PdfReader(str(path))
-    except Exception as exc:
-        raise HTTPException(
-            422,
-            f"Could not read PDF: {exc}",
-        )
-
-    pages = []
-
-    for i, page in enumerate(reader.pages, 1):
-        txt = normalize_text(
-            page.extract_text() or ""
-        )
-
-        if txt:
-            pages.append((i, txt))
-
-    content = "\n\n".join(
-        text for _, text in pages
-    )
-
-    if not content:
-        raise HTTPException(
-            422,
-            "No extractable text found in PDF. "
-            "Scanned/image-only PDFs need OCR before ingestion.",
-        )
-
-    # Try to detect an IS standard number.
-    match = re.search(
-        r"\bIS\s*[0-9]{2,6}"
-        r"(?:\s*\([^)]*\))?"
-        r"(?:\s*:\s*[0-9]{4})?",
-        content,
-        re.I,
-    )
-
-    standard_number = (
-        match.group(0).strip()
-        if match
-        else None
-    )
-
-    # If the same hash is already indexed, return it.
-    existing = s.scalar(
-        select(Document).where(
-            Document.content_hash == digest
-        )
-    )
-
-    if existing:
-        return {
-            "id": existing.id,
-            "title": existing.title,
-            "pages": len(pages),
-            "chunks": s.scalar(
-                select(Chunk)
-                .where(Chunk.document_id == existing.id)
-                .count()
-            ) if False else None,
-            "standard_number": existing.standard_number,
-            "verified": existing.verified,
-            "duplicate": True,
-        }
-
-    # Versioning:
-    # When a new document for the same standard arrives,
-    # previous CURRENT versions become OBSOLETE.
-    if standard_number:
-        previous = list(
-            s.scalars(
-                select(Document).where(
-                    Document.standard_number == standard_number,
-                    Document.status == "CURRENT",
-                )
-            ).all()
-        )
-
-        for old in previous:
-            old.status = "OBSOLETE"
-
-        version = f"Uploaded-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-    else:
-        version = "Uploaded"
-
-    d = Document(
-        title=filename,
-        standard_number=standard_number,
-        category="Uploaded document",
-        version=version,
-        source_url="Local upload",
-        source_type="User uploaded",
-        status="CURRENT",
-        content=content,
-        content_hash=digest,
-        verified=False,
-    )
-
-    s.add(d)
-    s.flush()
-
-    total_chunks = 0
-
-    # Preserve page-level evidence while chunking.
-    for page_number, page_text in pages:
-        pieces = chunk_text(
-            page_text,
-            size=1000,
-            overlap=150,
-        )
-
-        for i, piece in enumerate(pieces):
-            s.add(
-                Chunk(
-                    document_id=d.id,
-                    text=piece,
-                    page=page_number,
-                    section=f"PDF page {page_number}, chunk {i + 1}",
-                )
-            )
-            total_chunks += 1
-
-    s.commit()
-
-    return {
-        "id": d.id,
-        "title": d.title,
-        "pages": len(pages),
-        "chunks": total_chunks,
-        "standard_number": d.standard_number,
-        "version": d.version,
-        "verified": d.verified,
-        "status": d.status,
-        "message": (
-            "PDF indexed successfully. "
-            "The document remains unverified until an admin verifies it."
-        ),
-    }
